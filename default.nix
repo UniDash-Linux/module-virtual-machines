@@ -249,6 +249,8 @@ in {
 
     environment.systemPackages = with pkgs; [
       rofi-vm
+      looking-glass-client
+      virt-manager
     ];
 
     systemd.services.libvirtd.preStart =
