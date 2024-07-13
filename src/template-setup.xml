@@ -90,7 +90,7 @@ or other application using the libvirt API.
     </disk>
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
-      <source file='{{ isoFolderPath }}/{{ vm.isoName }}.iso'/>
+      <source file='{{ isoFolderPath }}/{{ vm.isoName }}'/>
       <target dev='sdb' bus='sata'/>
       <readonly/>
       <boot order='1'/>
