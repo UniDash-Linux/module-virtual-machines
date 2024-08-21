@@ -251,9 +251,42 @@ in {
       rofi-vm
       looking-glass-client
       virt-manager
+      (writeShellApplication {
+        name = "macos-dl";
+        text = ''
+          cd /var/lib/libvirt/images/;
+
+          sudo ${pkgs.wget}/bin/wget \
+            -O fetch-macos.py \
+            https://raw.githubusercontent.com/kholia/OSX-KVM/master/fetch-macOS-v2.py
+          sudo ${pkgs.python311}/bin/python3 fetch-macos.py;
+          sudo rm -rf BaseSystem.img
+          sudo ${pkgs.dmg2img}/bin/dmg2img -i BaseSystem.dmg BaseSystem.img;
+          sudo rm -rf BaseSystem.dmg fetch-macos.py;
+
+          sudo rm -rf OpenCore.qcow2
+          sudo ${pkgs.wget}/bin/wget \
+            -O OpenCore.qcow2 \
+            https://github.com/kholia/OSX-KVM/raw/master/OpenCore/OpenCore.qcow2
+
+          cd ..
+          sudo mkdir -p firmware/macos
+          cd firmware/macos
+
+          sudo rm -rf OVMF_VARS.fd
+          sudo ${pkgs.wget}/bin/wget \
+            -O OVMF_VARS.fd \
+            https://github.com/kholia/OSX-KVM/raw/master/OVMF_VARS-1920x1080.fd
+
+          sudo rm -rf OVMF_CODE.fd
+          sudo ${pkgs.wget}/bin/wget \
+            -O OVMF_CODE.fd \
+            https://github.com/kholia/OSX-KVM/raw/master/OVMF_CODE.fd
+        '';
+      })
     ];
 
-    systemd.services.libvirtd.preStart =
+    systemd.services.libvirtd.preStart = 
       lib.concatStrings (lib.forEach cfg.machines
     (vm:
       let
@@ -383,6 +416,26 @@ in {
           '');
 
         ssdEmulation = (lib.optionalString vm.hardware.disk.ssdEmulation
+          (ifElse (vm.os == "macos")
+          ''
+            <qemu:override>
+              <qemu:device alias="sata0-0-0">
+                <qemu:frontend>
+                  <qemu:property name="rotation_rate" type="unsigned" value="1"/>
+                </qemu:frontend>
+              </qemu:device>
+              <qemu:device alias="sata0-0-1">
+                <qemu:frontend>
+                  <qemu:property name="rotation_rate" type="unsigned" value="1"/>
+                </qemu:frontend>
+              </qemu:device>
+              <qemu:device alias="sata0-0-2">
+                <qemu:frontend>
+                  <qemu:property name="rotation_rate" type="unsigned" value="1"/>
+                </qemu:frontend>
+              </qemu:device>
+            </qemu:override>
+          ''
           ''
             <qemu:override>
               <qemu:device alias="scsi0-0-0-0">
@@ -391,7 +444,7 @@ in {
                 </qemu:frontend>
               </qemu:device>
             </qemu:override>
-          '');
+          ''));
 
         virtioIso = (lib.optionalString (vm.os == "win11") ''
           <disk type='file' device='cdrom'>
@@ -446,7 +499,9 @@ in {
             (vm.name)
             ssdEmulation
             osUrl
-          ] (builtins.readFile ./src/template.xml)
+          ] (builtins.readFile (ifElse (vm.os == "macos")
+            ./src/macOS.xml
+            ./src/template.xml))
         ));
 
         templateSetupConfig = (pkgs.writeText "template-setup-config" (
@@ -474,7 +529,9 @@ in {
             virtioIso
             osUrl
             (vm.isoName)
-          ] (builtins.readFile ./src/template-setup.xml)
+          ] (builtins.readFile (ifElse (vm.os == "macos")
+            ./src/macOS-setup.xml
+            ./src/template-setup.xml))
         ));
 
         pathISO = (pkgs.writeText "path-iso" (
