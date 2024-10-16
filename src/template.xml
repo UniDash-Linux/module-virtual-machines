@@ -82,8 +82,8 @@ or other application using the libvirt API.
   <devices>
     <emulator>/run/libvirt/nix-emulators/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='directsync' discard='unmap'/>
-      <source file='{{ vm.diskPath }}/{{ vm.name }}.qcow2'/>
+      <driver name='qemu' type='vdi' cache='directsync' discard='unmap'/>
+      <source file='{{ vm.diskPath }}/{{ vm.name }}.vhd'/>
       <target dev='sda' bus='scsi'/>
       <boot order='1'/>
       <address type='drive' controller='0' bus='0' target='0' unit='0'/>

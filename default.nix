@@ -548,10 +548,10 @@ in {
           mkdir -p /var/lib/libvirt/{hooks,qemu,storage}
           chmod 755 /var/lib/libvirt/{hooks,qemu,storage}
 
-          if [ ! -f ${vm.hardware.disk.path}/${vm.name}.qcow2 ]; then
+          if [ ! -f ${vm.hardware.disk.path}/${vm.name}.vhd ]; then
 	          mkdir -p ${vm.hardware.disk.path}
             qemu-img create \
-              -f qcow2 ${vm.hardware.disk.path}/${vm.name}.qcow2 \
+              -f vdi ${vm.hardware.disk.path}/${vm.name}.vhd \
               ${(toString vm.hardware.disk.size)}G
           fi
 
