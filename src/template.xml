@@ -7,7 +7,7 @@ or other application using the libvirt API.
 
 <domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{{ vm.name }}</name>
-  <uuid>b7823b62-d7d3-45fc-9478-508f0a42a71d</uuid>
+  <uuid>{{ uuid }}</uuid>
   <metadata>
     <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
       <libosinfo:os id="{{ osUrl }}"/>

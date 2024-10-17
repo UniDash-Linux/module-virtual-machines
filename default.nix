@@ -44,6 +44,14 @@ in {
             type = types.str;
             default = "win11";
           };
+          uuid = mkOption {
+            type = types.str;
+            default = "";
+          };
+          uuidSetup = mkOption {
+            type = types.str;
+            default = "";
+          };
 
           isoName = mkOption {
             type = types.str;
@@ -290,6 +298,15 @@ in {
       lib.concatStrings (lib.forEach cfg.machines
     (vm:
       let
+        uuidgen = vmName: let
+          command = (
+            pkgs.runCommand "uuid-for-${vmName}"
+            { nativeBuildInputs = [ pkgs.libuuid ]; } ''
+              uuidgen > $out
+            ''
+          );
+        in (lib.readFile "${command}");
+
         ifElse = condition: resultIf: resultElse: (
           if condition
           then resultIf
@@ -350,6 +367,14 @@ in {
           && vm.passthrough.restartDm
         )
           "systemctl restart display-manager.service");
+
+        uuid = ifElse (vm.uuid == "")
+          (uuidgen vm.name)
+          vm.uuid;
+
+        uuidSetup = ifElse (vm.uuidSetup == "")
+          (uuidgen "${vm.name}Setup")
+          vm.uuidSetup;
 
         pciesXml = (lib.optionalString (
           vm.passthrough.enable
@@ -487,6 +512,7 @@ in {
             "{{ vm.name }}"
             "{{ ssdEmulation }}"
             "{{ osUrl }}"
+            "{{ uuid }}"
           ] [
             (toString vm.hardware.memory)
             (toString (vm.hardware.cores * vm.hardware.threads))
@@ -499,6 +525,7 @@ in {
             (vm.name)
             ssdEmulation
             osUrl
+            (uuid)
           ] (builtins.readFile (ifElse (vm.os == "macos")
             ./src/macOS.xml
             ./src/template.xml))
@@ -517,6 +544,7 @@ in {
             "{{ virtioIso }}"
             "{{ osUrl }}"
             "{{ vm.isoName }}"
+            "{{ uuid }}"
           ] [
             (toString vm.hardware.memory)
             (toString (vm.hardware.cores * vm.hardware.threads))
@@ -529,6 +557,7 @@ in {
             virtioIso
             osUrl
             (vm.isoName)
+            (uuidSetup)
           ] (builtins.readFile (ifElse (vm.os == "macos")
             ./src/macOS-setup.xml
             ./src/template-setup.xml))

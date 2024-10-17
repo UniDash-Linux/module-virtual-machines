@@ -7,7 +7,7 @@ or other application using the libvirt API.
 
 <domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{{ vm.name }}-setup</name>
-  <uuid>69f40622-f83a-41a4-a464-567f4c6ef2b6</uuid>
+  <uuid>{{ uuid }}</uuid>
   <metadata>
     <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
       <libosinfo:os id="{{ osUrl }}"/>
@@ -192,7 +192,7 @@ or other application using the libvirt API.
     <interface type='network'>
       <mac address='52:54:00:2d:ff:da'/>
       <source network='default'/>
-      <model type='e1000e'/>
+      <model type='virtio'/>
       <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
     </interface>
     <channel type='spicevmc'>
