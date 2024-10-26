@@ -58,6 +58,11 @@ in {
             default = "win11.iso";
           };
 
+          lookingGlass = mkOption {
+            type = types.bool;
+            default = true;
+          };
+
           hardware = {
             cores = mkOption {
               type = types.int;
@@ -73,6 +78,10 @@ in {
             };
 
             disk = {
+              enable = mkOption {
+                type = types.bool;
+                default = true;
+              };
               size = mkOption {
                 type = types.int;
                 default = 128;
@@ -102,6 +111,10 @@ in {
             pcies = mkOption {
               default = [];
               type = listOf(submodule { options = {
+                disk = mkOption {
+                  type = types.bool;
+                  default = false;
+                };
                 lines = {
                   vmBus = mkOption {
                     type = types.str;
@@ -125,10 +138,9 @@ in {
                   };
                 };
                 
-
-                driver = mkOption {
-                  type = types.str;
-                  default = "";
+                drivers = mkOption {
+                  type = listOf(types.str);
+                  default = [];
                 };
 
                 blacklist = {
@@ -136,7 +148,11 @@ in {
                     type = types.bool;
                     default = false;
                   };
-                  pcie = mkOption {
+                  vfioPriority = mkOption {
+                    type = types.bool;
+                    default = false;
+                  };
+                  startUnload = mkOption {
                     type = types.bool;
                     default = false;
                   };
@@ -155,12 +171,13 @@ in {
         "vfio_pci"
         "vfio"
         "vfio_iommu_type1"
-        "amdgpu"
       ];
 
       extraModprobeConfig = let
         baseConfig = ''
           options kvm_intel kvm_amd modeset=1
+          options vfio_iommu_type1 allow_unsafe_interrupts=1
+          options kvm ignore_msrs=1
         '';
 
 
@@ -174,20 +191,32 @@ in {
                   ''
                 )))))) cfg.machines);
 
+        driverBlacklistOptions = lib.concatStrings (
+          builtins.map (vm:
+            lib.optionalString vm.passthrough.enable
+              (lib.concatStrings (lib.forEach vm.passthrough.pcies (pcie:
+                lib.optionalString (pcie.blacklist.driver && ! pcie.disk)
+                  (lib.concatStrings (lib.forEach pcie.drivers (driver:
+                    ''
+                      options ${driver} modeset=0
+                      blacklist ${driver}
+                    ''))))))) cfg.machines);
+
         pciBlacklistOptions = lib.concatStrings (
           builtins.map (vm:
             lib.optionalString vm.passthrough.enable
               (lib.concatStrings (lib.forEach vm.passthrough.pcies (pcie:
-                lib.optionalString (pcie.blacklist.driver)
-                  ''
-                    options ${pcie.driver} modeset=0
-                    blacklist ${pcie.driver}
-                  '')))) cfg.machines);
+                lib.optionalString (pcie.blacklist.vfioPriority && ! pcie.disk)
+                  (lib.concatStrings (lib.forEach pcie.drivers (driver:
+                    ''
+                      softdep ${driver} pre: vfio-pci
+                    ''))))))) cfg.machines);
 
       in lib.concatStrings ([
         baseConfig
-        vfioPciOptions
+        driverBlacklistOptions
         pciBlacklistOptions
+        vfioPciOptions
       ]);
 
       kernelParams = [
@@ -327,27 +356,31 @@ in {
               ${lines pcie.lines function}
               echo 0000:$PCIE_FULL \
                 > /sys/bus/pci/devices/0000\:$PCIE_ESCAPED/driver/unbind \
-                2> /dev/null
+                2> /dev/null || true
             '')
           );
 
-          bindPciesSetter = pcie: lib.concatStrings (
-            lib.forEach pcie.lines.functions (function: ''
-              ${lines pcie.lines function}
-              echo 0000:$PCIE_FULL > \
-                /sys/bus/pci/drivers/${pcie.driver}/bind \
-                2> /dev/null
-            '')
-          );
+          bindPciesSetter = pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
+            lib.forEach pcie.lines.functions (function: 
+              lib.concatStrings (lib.forEach pcie.drivers (driver: ''
+                ${lines pcie.lines function}
+                echo 0000:$PCIE_FULL > \
+                  /sys/bus/pci/drivers/${driver}/bind \
+                  2> /dev/null || true
+              ''))
+            )
+          ));
 
           blacklistCondition = blacklist: lib.optionalString (
             ! blacklist.driver
-            && blacklist.pcie
+            && blacklist.startUnload
+            && ! blacklist.vfioPriority
           );
 
           bindingCondition = blacklist: lib.optionalString (
             ! blacklist.driver
-            && ! blacklist.pcie
+            && ! blacklist.vfioPriority
+            && ! blacklist.startUnload
           );
 
           finalString = condition: binding: lib.optionalString vm.passthrough.enable (
@@ -359,7 +392,7 @@ in {
         in {
           bind = (finalString bindingCondition bindPciesSetter);
           unbind = (finalString bindingCondition unbindPciesSetter);
-          blacklist = (finalString blacklistCondition unbindPciesSetter);
+          startUnload = (finalString blacklistCondition unbindPciesSetter);
         };
 
         restartDmFormated = (lib.optionalString (
@@ -372,6 +405,20 @@ in {
           (uuidgen vm.name)
           vm.uuid;
 
+        lookingGlass = lib.optionalString (vm.lookingGlass) ''
+          <shmem name='looking-glass'>
+            <model type='ivshmem-plain'/>
+            <size unit='M'>1024</size>
+            <address
+              type='pci'
+              domain='0x0000'
+              bus='0x10'
+              slot='0x01'
+              function='0x0'
+            />
+          </shmem>
+        '';
+
         uuidSetup = ifElse (vm.uuidSetup == "")
           (uuidgen "${vm.name}Setup")
           vm.uuidSetup;
@@ -379,7 +426,7 @@ in {
         pciesXml = (lib.optionalString (
           vm.passthrough.enable
         ) (
-          lib.concatStrings (builtins.map (pcie: lib.concatStrings (
+          lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
             lib.forEach pcie.lines.functions (function: ''
               <hostdev
                 mode='subsystem'
@@ -404,7 +451,39 @@ in {
                 <!-- multifunction='on' -->
               </hostdev>
             '')
-          )) vm.passthrough.pcies)
+          ))) vm.passthrough.pcies)
+        ));
+
+        pciesDiskXml = (lib.optionalString (
+          vm.passthrough.enable
+        ) (
+          lib.concatStrings (builtins.map (pcie: lib.optionalString pcie.disk (lib.concatStrings (
+            lib.forEach pcie.lines.functions (function: ''
+              <hostdev
+                mode='subsystem'
+                type='pci'
+                managed='yes'
+              >
+                <source>
+                  <address
+                    domain='0x0000'
+                    bus='0x${pcie.lines.bus}'
+                    slot='0x${pcie.lines.slot}'
+                    function='0x${function}'
+                  />
+                </source>
+                <boot order="1"/>
+                <address
+                  type='pci'
+                  domain='0x0000'
+                  bus='0x${pcie.lines.vmBus}'
+                  slot='0x${pcie.lines.slot}'
+                  function='0x${function}'
+                />
+                <!-- multifunction='on' -->
+              </hostdev>
+            '')
+          ))) vm.passthrough.pcies)
         ));
 
         videoVirtio = (ifElse (vm.passthrough.enable)
@@ -412,9 +491,14 @@ in {
             <model type='none'/>
           ''
           ''
-            <model type="virtio" heads="1" primary="yes">
-              <acceleration accel3d="no"/>
-            </model>
+            <model
+              type="qxl"
+              ram="65536"
+              vram="65536"
+              vgamem="16384"
+              heads="1"
+              primary="yes"
+            />
             <address
               type="pci"
               domain="0x0000"
@@ -485,6 +569,16 @@ in {
           "http://libosinfo.org/linux/2022"
           "http://microsoft.com/win/11");
 
+        disk = lib.optionalString (vm.hardware.disk.enable) ''
+          <disk type='file' device='disk'>
+            <driver name='qemu' type='qcow2' cache='directsync' discard='unmap'/>
+            <source file='${vm.diskPath}/${vm.name}.qcow2'/>
+            <target dev='sda' bus='scsi'/>
+            <boot order='1'/>
+            <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+          </disk>
+        '';
+
         qemuHook = (pkgs.writeScript "qemu-hook" (
           builtins.replaceStrings [
             "{{ unbindPcies }}"
@@ -513,6 +607,9 @@ in {
             "{{ ssdEmulation }}"
             "{{ osUrl }}"
             "{{ uuid }}"
+            "{{ lookingGlass }}"
+            "{{ disk }}"
+            "{{ pciesDiskXml }}"
           ] [
             (toString vm.hardware.memory)
             (toString (vm.hardware.cores * vm.hardware.threads))
@@ -526,6 +623,9 @@ in {
             ssdEmulation
             osUrl
             (uuid)
+            lookingGlass
+            disk
+            pciesDiskXml
           ] (builtins.readFile (ifElse (vm.os == "macos")
             ./src/macOS.xml
             ./src/template.xml))
@@ -545,6 +645,8 @@ in {
             "{{ osUrl }}"
             "{{ vm.isoName }}"
             "{{ uuid }}"
+            "{{ disk }}"
+            "{{ pciesDiskXml }}"
           ] [
             (toString vm.hardware.memory)
             (toString (vm.hardware.cores * vm.hardware.threads))
@@ -558,6 +660,8 @@ in {
             osUrl
             (vm.isoName)
             (uuidSetup)
+            disk
+            pciesDiskXml
           ] (builtins.readFile (ifElse (vm.os == "macos")
             ./src/macOS-setup.xml
             ./src/template-setup.xml))
@@ -572,17 +676,19 @@ in {
         ));
       in
         ''
-          ${bindingPcie.blacklist}
+          ${bindingPcie.startUnload}
 
           mkdir -p /var/lib/libvirt/{hooks,qemu,storage}
           chmod 755 /var/lib/libvirt/{hooks,qemu,storage}
 
-          if [ ! -f ${vm.hardware.disk.path}/${vm.name}.vhd ]; then
-	          mkdir -p ${vm.hardware.disk.path}
-            qemu-img create \
-              -f vdi ${vm.hardware.disk.path}/${vm.name}.vhd \
-              ${(toString vm.hardware.disk.size)}G
-          fi
+          ${(lib.optionalString vm.hardware.disk.enable ''
+            if [ ! -f "${vm.hardware.disk.path}/${vm.name}.qcow2" ]; then
+	            mkdir -p "${vm.hardware.disk.path}"
+              qemu-img create \
+                -f qcow2 "${vm.hardware.disk.path}/${vm.name}.qcow2" \
+                ${(toString vm.hardware.disk.size)}G
+            fi
+          '')}
 
           # Copy hook files
           ln -sf ${qemuHook} /var/lib/libvirt/hooks/qemu.d/${vm.name}

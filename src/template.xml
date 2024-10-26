@@ -81,13 +81,7 @@ or other application using the libvirt API.
   </pm>
   <devices>
     <emulator>/run/libvirt/nix-emulators/qemu-system-x86_64</emulator>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='vdi' cache='directsync' discard='unmap'/>
-      <source file='{{ vm.diskPath }}/{{ vm.name }}.vhd'/>
-      <target dev='sda' bus='scsi'/>
-      <boot order='1'/>
-      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
-    </disk>
+    {{ disk }}
     <controller type='usb' index='0' model='qemu-xhci' ports='15'>
       <address type='pci' domain='0x0000' bus='0x02' slot='0x00' function='0x0'/>
     </controller>
@@ -209,6 +203,7 @@ or other application using the libvirt API.
     <audio id='1' type='spice'/>
     <video>{{ videoVirtio }}</video>
     {{ vm.pcies }}
+    {{ pciesDiskXml }}
     <redirdev bus='usb' type='spicevmc'>
       <address type='usb' bus='0' port='2'/>
     </redirdev>
@@ -219,11 +214,7 @@ or other application using the libvirt API.
     <memballoon model='virtio'>
       <address type='pci' domain='0x0000' bus='0x05' slot='0x00' function='0x0'/>
     </memballoon>
-    <shmem name='looking-glass'>
-      <model type='ivshmem-plain'/>
-      <size unit='M'>32</size>
-      <address type='pci' domain='0x0000' bus='0x10' slot='0x01' function='0x0'/>
-    </shmem>
+    {{ lookingGlass }}
   </devices>
   {{ ssdEmulation }}
 </domain>

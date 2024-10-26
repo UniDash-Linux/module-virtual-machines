@@ -81,19 +81,13 @@ or other application using the libvirt API.
   </pm>
   <devices>
     <emulator>/run/libvirt/nix-emulators/qemu-system-x86_64</emulator>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='vdi' cache='directsync' discard='unmap'/>
-      <source file='{{ vm.diskPath }}/{{ vm.name }}.vhd'/>
-      <target dev='sda' bus='scsi'/>
-      <boot order='2'/>
-      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
-    </disk>
+    {{ disk }}
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
       <source file='{{ isoFolderPath }}/{{ vm.isoName }}'/>
       <target dev='sdb' bus='sata'/>
       <readonly/>
-      <boot order='1'/>
+      <boot order='2'/>
       <address type='drive' controller='0' bus='0' target='0' unit='1'/>
     </disk>
     {{ virtioIso }}
@@ -215,9 +209,10 @@ or other application using the libvirt API.
     </sound>
     <audio id='1' type='spice'/>
     <video>
-      <model type='virtio' heads='1' primary='yes'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x0'/>
+      <model type="qxl" ram="65536" vram="65536" vgamem="16384" heads="1" primary="yes"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x01" function="0x0"/>
     </video>
+    {{ pciesDiskXml }}
     <redirdev bus='usb' type='spicevmc'>
       <address type='usb' bus='0' port='2'/>
     </redirdev>
