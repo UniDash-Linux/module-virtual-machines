@@ -132,6 +132,10 @@ in {
                     type = listOf(types.str);
                     default = [];
                   };
+                  romsFunctions = mkOption {
+                    type = listOf(types.str);
+                    default = [];
+                  };
                   ids = mkOption {
                     type = listOf(types.str);
                     default = [];
@@ -168,14 +172,14 @@ in {
   config = mkIf (cfg.enable) {
     boot = {
       initrd.kernelModules = [
-        "vfio_pci"
         "vfio"
         "vfio_iommu_type1"
+        "vfio_pci"
+        "vfio_virqfd"
       ];
 
       extraModprobeConfig = let
         baseConfig = ''
-          options kvm_intel kvm_amd modeset=1
           options vfio_iommu_type1 allow_unsafe_interrupts=1
           options kvm ignore_msrs=1
         '';
@@ -223,6 +227,8 @@ in {
         "intel_iommu=on"
         "amd_iommu=on"
         "iommu=pt"
+        "kvm_amd.npt=1"
+        "kvm_amd.avic=1"
         "video=efifb:off"
       ];
     };
@@ -336,6 +342,17 @@ in {
           );
         in (lib.readFile "${command}");
 
+        pcieRomGen = pcie: (
+          pkgs.runCommand "pcie-${pcie}.rom"
+          { nativeBuildInputs = [ pkgs.libuuid ]; } ''
+            PATH_TO_ROM=$(find /sys/devices/pci0000:00/ | grep ${pcie} | grep rom)
+
+            echo 1 > $PATH_TO_ROM
+            cat $PATH_TO_ROM > $out
+            echo 0 > $PATH_TO_ROM
+          ''
+        );
+
         ifElse = condition: resultIf: resultElse: (
           if condition
           then resultIf
@@ -423,7 +440,7 @@ in {
           (uuidgen "${vm.name}Setup")
           vm.uuidSetup;
 
-        pciesXml = (lib.optionalString (
+        pciesWithoutRomsXml = (lib.optionalString (
           vm.passthrough.enable
         ) (
           lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
@@ -454,6 +471,65 @@ in {
           ))) vm.passthrough.pcies)
         ));
 
+        pciesWithRomsXml = (lib.optionalString (
+          vm.passthrough.enable
+        ) (
+          lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
+            lib.forEach pcie.lines.romsFunctions (function: let
+              pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function}";
+            in ''
+              <hostdev
+                mode='subsystem'
+                type='pci'
+                managed='yes'
+              >
+                <source>
+                  <address
+                    domain='0x0000'
+                    bus='0x${pcie.lines.bus}'
+                    slot='0x${pcie.lines.slot}'
+                    function='0x${function}'
+                  />
+                </source>
+                <rom bar="on" file="/var/lib/libvirt/roms/pcie-${pcieId}.rom"/>
+                <address
+                  type='pci'
+                  domain='0x0000'
+                  bus='0x${pcie.lines.vmBus}'
+                  slot='0x${pcie.lines.slot}'
+                  function='0x${function}'
+                />
+                <!-- multifunction='on' -->
+              </hostdev>
+            '')
+          ))) vm.passthrough.pcies)
+        ));
+
+        generateRoms = (lib.optionalString (
+          vm.passthrough.enable
+        ) (
+          lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
+            lib.forEach pcie.lines.romsFunctions (function: let
+              pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function}";
+            in ''
+              if [ ! -f "/var/lib/libvirt/roms/pcie-${pcieId}.rom" ]; then
+                PATH_TO_ROM=$(find /sys/devices/pci0000:00/ \
+                  | grep ${pcieId} \
+                  | grep rom)
+
+                echo 1 > $PATH_TO_ROM
+                cat $PATH_TO_ROM > /var/lib/libvirt/roms/pcie-${pcieId}.rom
+                echo 0 > $PATH_TO_ROM
+              fi
+              '')
+          ))) vm.passthrough.pcies)
+        ));
+
+        pciesXml = lib.concatStrings [
+          pciesWithRomsXml
+          pciesWithoutRomsXml
+        ];
+        
         pciesDiskXml = (lib.optionalString (
           vm.passthrough.enable
         ) (
@@ -678,8 +754,8 @@ in {
         ''
           ${bindingPcie.startUnload}
 
-          mkdir -p /var/lib/libvirt/{hooks,qemu,storage}
-          chmod 755 /var/lib/libvirt/{hooks,qemu,storage}
+          mkdir -p /var/lib/libvirt/{hooks,qemu,storage,roms}
+          chmod 755 /var/lib/libvirt/{hooks,qemu,storage,roms}
 
           ${(lib.optionalString vm.hardware.disk.enable ''
             if [ ! -f "${vm.hardware.disk.path}/${vm.name}.qcow2" ]; then
