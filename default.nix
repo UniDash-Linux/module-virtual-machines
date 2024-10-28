@@ -7,6 +7,15 @@
 let
   cfg = config.virtualisation.virtualMachines;
 
+  concatFor = array: return: (lib.concatStrings
+    (map return array)  
+  );
+
+  optionalConcatFor = { condition, array, return }:
+    (lib.optionalString condition
+      (concatFor array return)
+    );
+
   inherit (lib) mkIf mkOption types;
 in {
   options = {
@@ -129,36 +138,45 @@ in {
                     default = "";
                   };
                   functions = mkOption {
-                    type = listOf(types.str);
                     default = [];
-                  };
-                  romsFunctions = mkOption {
-                    type = listOf(types.str);
-                    default = [];
-                  };
-                  ids = mkOption {
-                    type = listOf(types.str);
-                    default = [];
-                  };
-                };
-                
-                drivers = mkOption {
-                  type = listOf(types.str);
-                  default = [];
-                };
+                    type = listOf(submodule { options = {
+                      rom = mkOption {
+                        type = types.bool;
+                        default = false;
+                      };
 
-                blacklist = {
-                  driver = mkOption {
-                    type = types.bool;
-                    default = false;
-                  };
-                  vfioPriority = mkOption {
-                    type = types.bool;
-                    default = false;
-                  };
-                  startUnload = mkOption {
-                    type = types.bool;
-                    default = false;
+                      function = mkOption {
+                        type = types.str;
+                        default = "";
+                      };
+
+                      drivers = mkOption {
+                        type = listOf(types.str);
+                        default = [];
+                      };
+
+                      vendor = mkOption {
+                        type = types.str;
+                        default = "";
+                      };
+
+                      blacklist = {
+                        driver = mkOption {
+                          type = types.bool;
+                          default = false;
+                        };
+
+                        vfioPriority = mkOption {
+                          type = types.bool;
+                          default = false;
+                        };
+
+                        startUnload = mkOption {
+                          type = types.bool;
+                          default = false;
+                        };
+                      };
+                    };});
                   };
                 };
               };});
@@ -175,7 +193,6 @@ in {
         "vfio"
         "vfio_iommu_type1"
         "vfio_pci"
-        "vfio_virqfd"
       ];
 
       extraModprobeConfig = let
@@ -185,36 +202,47 @@ in {
         '';
 
 
-        vfioPciOptions = lib.concatStrings (
-          builtins.map (vm:
-            lib.optionalString vm.passthrough.enable
-              (lib.concatStrings (lib.forEach vm.passthrough.pcies (pcie:
-                lib.concatStrings (lib.forEach pcie.lines.ids (id:
-                  ''
-                    options vfio-pci ids=${id}
-                  ''
-                )))))) cfg.machines);
+        vfioPciOptions = concatFor cfg.machines (vm:
+          optionalConcatFor {
+            condition = vm.passthrough.enable;
+            array = vm.passthrough.pcies; 
+            return = (pcie: concatFor pcie.lines.functions
+              (function: lib.optionalString
+                (function.blacklist.vfioPriority) ''
+                  options vfio-pci ids=${function.vendor}
+                ''
+              )
+            );
+          });
 
-        driverBlacklistOptions = lib.concatStrings (
-          builtins.map (vm:
-            lib.optionalString vm.passthrough.enable
-              (lib.concatStrings (lib.forEach vm.passthrough.pcies (pcie:
-                lib.optionalString (pcie.blacklist.driver && ! pcie.disk)
-                  (lib.concatStrings (lib.forEach pcie.drivers (driver:
-                    ''
-                      options ${driver} modeset=0
-                      blacklist ${driver}
-                    ''))))))) cfg.machines);
+        driverBlacklistOptions = concatFor cfg.machines (vm:
+          optionalConcatFor {
+            condition = vm.passthrough.enable;
+            array = vm.passthrough.pcies;
+            return = (pcie: concatFor pcie.lines.functions (function:
+              optionalConcatFor {
+                condition = (function.blacklist.driver && ! pcie.disk);
+                array = function.drivers;
+                return = (driver: ''
+                  options ${driver} modeset=0
+                  blacklist ${driver}
+                '');
+              }));
+          });
 
-        pciBlacklistOptions = lib.concatStrings (
-          builtins.map (vm:
-            lib.optionalString vm.passthrough.enable
-              (lib.concatStrings (lib.forEach vm.passthrough.pcies (pcie:
-                lib.optionalString (pcie.blacklist.vfioPriority && ! pcie.disk)
-                  (lib.concatStrings (lib.forEach pcie.drivers (driver:
-                    ''
-                      softdep ${driver} pre: vfio-pci
-                    ''))))))) cfg.machines);
+        pciBlacklistOptions = concatFor cfg.machines (vm:
+          optionalConcatFor {
+            condition = vm.passthrough.enable;
+            array = vm.passthrough.pcies;
+            return = (pcie: concatFor pcie.lines.functions (function:
+              optionalConcatFor {
+                condition = (function.blacklist.vfioPriority && ! pcie.disk);
+                array = function.drivers;
+                return = (driver: ''
+                  softdep ${driver} pre: vfio-pci
+                '');
+              }));
+          });
 
       in lib.concatStrings ([
         baseConfig
@@ -342,17 +370,6 @@ in {
           );
         in (lib.readFile "${command}");
 
-        pcieRomGen = pcie: (
-          pkgs.runCommand "pcie-${pcie}.rom"
-          { nativeBuildInputs = [ pkgs.libuuid ]; } ''
-            PATH_TO_ROM=$(find /sys/devices/pci0000:00/ | grep ${pcie} | grep rom)
-
-            echo 1 > $PATH_TO_ROM
-            cat $PATH_TO_ROM > $out
-            echo 0 > $PATH_TO_ROM
-          ''
-        );
-
         ifElse = condition: resultIf: resultElse: (
           if condition
           then resultIf
@@ -360,51 +377,37 @@ in {
         );
 
         bindingPcie = let
-          lines = lines: function: ''
-            BUS="${lines.bus}"
-            SLOT="${lines.slot}"
-            FUNCTION="${function}"
-            PCIE_FULL="$BUS:$SLOT.$FUNCTION"
-            PCIE_ESCAPED="$BUS\\:$SLOT.$FUNCTION"
+          unbindPciesSetter = pcie: function: ''
+            echo "${pcie}" > "/sys/bus/pci/devices/0000:${pcie}/driver/unbind" || true
+            echo "${pcie}" > /sys/bus/pci/drivers/vfio-pci/new_id || true
           '';
 
-          unbindPciesSetter = pcie: lib.concatStrings (
-            lib.forEach pcie.lines.functions (function: ''
-              ${lines pcie.lines function}
-              echo 0000:$PCIE_FULL \
-                > /sys/bus/pci/devices/0000\:$PCIE_ESCAPED/driver/unbind \
-                2> /dev/null || true
-            '')
-          );
+          bindPciesSetter = pcie: function: ''
+            echo "${function.vendor}" > "/sys/bus/pci/drivers/vfio-pci/remove_id" || true
+            echo 1 > "/sys/bus/pci/devices/0000:${pcie}/remove" || true
+          '';
 
-          bindPciesSetter = pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
-            lib.forEach pcie.lines.functions (function: 
-              lib.concatStrings (lib.forEach pcie.drivers (driver: ''
-                ${lines pcie.lines function}
-                echo 0000:$PCIE_FULL > \
-                  /sys/bus/pci/drivers/${driver}/bind \
-                  2> /dev/null || true
-              ''))
-            )
-          ));
-
-          blacklistCondition = blacklist: lib.optionalString (
+          blacklistCondition = blacklist: pcie: lib.optionalString (
             ! blacklist.driver
             && blacklist.startUnload
             && ! blacklist.vfioPriority
           );
 
-          bindingCondition = blacklist: lib.optionalString (
+          bindingCondition = blacklist: pcie: lib.optionalString (
             ! blacklist.driver
             && ! blacklist.vfioPriority
             && ! blacklist.startUnload
           );
 
-          finalString = condition: binding: lib.optionalString vm.passthrough.enable (
-            lib.concatStrings (builtins.map (pcie:
-              (condition pcie.blacklist) (binding pcie)
-            ) vm.passthrough.pcies)
-          );
+          finalString = condition: binding: optionalConcatFor {
+            condition = vm.passthrough.enable;
+            array = vm.passthrough.pcies;
+            return = (pcie: concatFor pcie.lines.functions (function: let
+              pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function.function}";
+            in 
+              (condition function.blacklist pcie) (binding pcieId function)
+            ));
+          };
 
         in {
           bind = (finalString bindingCondition bindPciesSetter);
@@ -436,47 +439,26 @@ in {
           </shmem>
         '';
 
+        lookingGlassFixPerm = lib.optionalString (vm.lookingGlass) ''
+          chown ${cfg.username}:libvirtd /dev/shm/looking-glass
+        '';
+
         uuidSetup = ifElse (vm.uuidSetup == "")
           (uuidgen "${vm.name}Setup")
           vm.uuidSetup;
 
-        pciesWithoutRomsXml = (lib.optionalString (
-          vm.passthrough.enable
-        ) (
-          lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
-            lib.forEach pcie.lines.functions (function: ''
-              <hostdev
-                mode='subsystem'
-                type='pci'
-                managed='yes'
-              >
-                <source>
-                  <address
-                    domain='0x0000'
-                    bus='0x${pcie.lines.bus}'
-                    slot='0x${pcie.lines.slot}'
-                    function='0x${function}'
-                  />
-                </source>
-                <address
-                  type='pci'
-                  domain='0x0000'
-                  bus='0x${pcie.lines.vmBus}'
-                  slot='0x${pcie.lines.slot}'
-                  function='0x${function}'
-                />
-                <!-- multifunction='on' -->
-              </hostdev>
-            '')
-          ))) vm.passthrough.pcies)
-        ));
-
-        pciesWithRomsXml = (lib.optionalString (
-          vm.passthrough.enable
-        ) (
-          lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
-            lib.forEach pcie.lines.romsFunctions (function: let
-              pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function}";
+        pciesXml = optionalConcatFor {
+          condition = vm.passthrough.enable;
+          array = vm.passthrough.pcies;
+          return = (pcie: optionalConcatFor {
+            condition = ! pcie.disk;
+            array = pcie.lines.functions;
+            return = (function: let
+              pcieId =
+                "${pcie.lines.bus}:${pcie.lines.slot}.${function.function}";
+              rom = lib.optionalString function.rom ''
+                <rom bar="on" file="/var/lib/libvirt/roms/pcie-${pcieId}.rom"/>
+              '';
             in ''
               <hostdev
                 mode='subsystem'
@@ -488,53 +470,52 @@ in {
                     domain='0x0000'
                     bus='0x${pcie.lines.bus}'
                     slot='0x${pcie.lines.slot}'
-                    function='0x${function}'
+                    function='0x${function.function}'
                   />
                 </source>
-                <rom bar="on" file="/var/lib/libvirt/roms/pcie-${pcieId}.rom"/>
+                ${rom}
                 <address
                   type='pci'
                   domain='0x0000'
                   bus='0x${pcie.lines.vmBus}'
                   slot='0x${pcie.lines.slot}'
-                  function='0x${function}'
+                  function='0x${function.function}'
                 />
                 <!-- multifunction='on' -->
               </hostdev>
-            '')
-          ))) vm.passthrough.pcies)
-        ));
+            '');
+          });
+        };
 
-        generateRoms = (lib.optionalString (
-          vm.passthrough.enable
-        ) (
-          lib.concatStrings (builtins.map (pcie: lib.optionalString (! pcie.disk) (lib.concatStrings (
-            lib.forEach pcie.lines.romsFunctions (function: let
-              pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function}";
+        generateRoms = optionalConcatFor {
+          condition = vm.passthrough.enable;
+          array = vm.passthrough.pcies;
+          return = (pcie: optionalConcatFor {
+            condition = ! pcie.disk;
+            array = pcie.lines.functions;
+            return = (function: lib.optionalString function.rom (let
+              pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function.function}";
             in ''
               if [ ! -f "/var/lib/libvirt/roms/pcie-${pcieId}.rom" ]; then
                 PATH_TO_ROM=$(find /sys/devices/pci0000:00/ \
                   | grep ${pcieId} \
                   | grep rom)
 
-                echo 1 > $PATH_TO_ROM
-                cat $PATH_TO_ROM > /var/lib/libvirt/roms/pcie-${pcieId}.rom
-                echo 0 > $PATH_TO_ROM
+                echo 1 > "$PATH_TO_ROM"
+                cat "$PATH_TO_ROM" > /var/lib/libvirt/roms/pcie-${pcieId}.rom
+                echo 0 > "$PATH_TO_ROM"
               fi
-              '')
-          ))) vm.passthrough.pcies)
-        ));
+            ''));
+          });
+        };
 
-        pciesXml = lib.concatStrings [
-          pciesWithRomsXml
-          pciesWithoutRomsXml
-        ];
-        
-        pciesDiskXml = (lib.optionalString (
-          vm.passthrough.enable
-        ) (
-          lib.concatStrings (builtins.map (pcie: lib.optionalString pcie.disk (lib.concatStrings (
-            lib.forEach pcie.lines.functions (function: ''
+        pciesDiskXml = optionalConcatFor {
+          condition = vm.passthrough.enable;
+          array = vm.passthrough.pcies;
+          return = (pcie: optionalConcatFor {
+            condition = pcie.disk;
+            array = pcie.lines.functions;
+            return = (function: ''
               <hostdev
                 mode='subsystem'
                 type='pci'
@@ -545,7 +526,7 @@ in {
                     domain='0x0000'
                     bus='0x${pcie.lines.bus}'
                     slot='0x${pcie.lines.slot}'
-                    function='0x${function}'
+                    function='0x${function.function}'
                   />
                 </source>
                 <boot order="1"/>
@@ -554,13 +535,13 @@ in {
                   domain='0x0000'
                   bus='0x${pcie.lines.vmBus}'
                   slot='0x${pcie.lines.slot}'
-                  function='0x${function}'
+                  function='0x${function.function}'
                 />
                 <!-- multifunction='on' -->
               </hostdev>
-            '')
-          ))) vm.passthrough.pcies)
-        ));
+            '');
+          });
+        };
 
         videoVirtio = (ifElse (vm.passthrough.enable)
           ''
@@ -655,17 +636,26 @@ in {
           </disk>
         '';
 
+        generateDisk = lib.optionalString vm.hardware.disk.enable ''
+          if [ ! -f "${vm.hardware.disk.path}/${vm.name}.qcow2" ]; then
+	          mkdir -p "${vm.hardware.disk.path}"
+            qemu-img create \
+              -f qcow2 "${vm.hardware.disk.path}/${vm.name}.qcow2" \
+              ${(toString vm.hardware.disk.size)}G
+          fi
+        '';
+
         qemuHook = (pkgs.writeScript "qemu-hook" (
           builtins.replaceStrings [
             "{{ unbindPcies }}"
             "{{ bindPcies }}"
             "{{ restartDm }}"
-            "{{ username }}"
+            "{{ lookingGlassFixPerm }}"
           ] [
             (bindingPcie.unbind)
             (bindingPcie.bind)
             restartDmFormated
-            (cfg.username)
+            lookingGlassFixPerm
           ] (builtins.readFile ./src/qemuHook.sh)
         ));
 
@@ -757,18 +747,12 @@ in {
           mkdir -p /var/lib/libvirt/{hooks,qemu,storage,roms}
           chmod 755 /var/lib/libvirt/{hooks,qemu,storage,roms}
 
-          ${(lib.optionalString vm.hardware.disk.enable ''
-            if [ ! -f "${vm.hardware.disk.path}/${vm.name}.qcow2" ]; then
-	            mkdir -p "${vm.hardware.disk.path}"
-              qemu-img create \
-                -f qcow2 "${vm.hardware.disk.path}/${vm.name}.qcow2" \
-                ${(toString vm.hardware.disk.size)}G
-            fi
-          '')}
+          ${generateRoms}
+          ${generateDisk}
 
           # Copy hook files
           ln -sf ${qemuHook} /var/lib/libvirt/hooks/qemu.d/${vm.name}
-          ln -sf ${pathISO} /var/lib/libvirt/storage/ISO.xml
+          ln -sf ${pathISO} /var/lib/libvirt/storage/ISO-${vm.name}.xml
           ln -sf ${templateConfig} /var/lib/libvirt/qemu/${vm.name}.xml
           ln -sf ${templateSetupConfig} /var/lib/libvirt/qemu/${vm.name}-setup.xml
         ''

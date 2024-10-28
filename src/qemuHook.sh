@@ -10,11 +10,12 @@ if [[ "${OBJECT}x" == "win11x" ]]; then
     ;;
 
     "startedx")
-      chown {{ username }}:libvirtd /dev/shm/looking-glass
+      {{ lookingGlassFixPerm }}
     ;;
 
     "releasex")
       {{ bindPcies }}
+      echo 1 > "/sys/bus/pci/rescan"
       {{ restartDm }}
     ;;
   esac
