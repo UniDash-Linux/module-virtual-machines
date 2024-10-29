@@ -15,6 +15,23 @@ let
     (lib.optionalString condition
       (concatFor array return)
     );
+    
+  concatJoin = join: array: return: (lib.concatStringsSep join
+    (map return array)  
+  );
+
+  optionalConcatJoin = { condition, array, return, join }:
+    (lib.optionalString condition
+      (concatJoin join array return)
+    );
+
+  exec = storeName: input: script: let
+    command = (
+      pkgs.runCommand "${storeName}"
+        { nativeBuildInputs = input; }
+        script
+    );
+  in (lib.readFile "${command}");
 
   inherit (lib) mkIf mkOption types;
 in {
@@ -140,9 +157,17 @@ in {
                   functions = mkOption {
                     default = [];
                     type = listOf(submodule { options = {
-                      rom = mkOption {
-                        type = types.bool;
-                        default = false;
+                      fix = {
+                        rom = mkOption {
+                          type = types.bool;
+                          default = true;
+                        };
+                        
+                        rebar = mkOption {
+                          type = types.int;
+                          default = 0;
+                        };
+                        
                       };
 
                       function = mkOption {
@@ -202,18 +227,24 @@ in {
         '';
 
 
-        vfioPciOptions = concatFor cfg.machines (vm:
-          optionalConcatFor {
-            condition = vm.passthrough.enable;
-            array = vm.passthrough.pcies; 
-            return = (pcie: concatFor pcie.lines.functions
-              (function: lib.optionalString
-                (function.blacklist.vfioPriority) ''
-                  options vfio-pci ids=${function.vendor}
-                ''
-              )
-            );
-          });
+        vfioPciOptions = let
+          join = ",";
+          vendors = concatJoin join cfg.machines (vm:
+            optionalConcatJoin {
+              inherit join;
+              condition = vm.passthrough.enable;
+              array = vm.passthrough.pcies; 
+              return = (pcie: concatJoin join pcie.lines.functions
+                (function: lib.optionalString
+                  (function.blacklist.vfioPriority)
+                  function.vendor
+                )
+              );
+            }
+          );
+        in lib.optionalString ("${vendors}" != "") ''
+          options vfio-pci ids=${vendors} disable_vga=1 x-no-kvm-intx=on
+        '';
 
         driverBlacklistOptions = concatFor cfg.machines (vm:
           optionalConcatFor {
@@ -361,14 +392,10 @@ in {
       lib.concatStrings (lib.forEach cfg.machines
     (vm:
       let
-        uuidgen = vmName: let
-          command = (
-            pkgs.runCommand "uuid-for-${vmName}"
-            { nativeBuildInputs = [ pkgs.libuuid ]; } ''
-              uuidgen > $out
-            ''
-          );
-        in (lib.readFile "${command}");
+        uuidgen = vmName:
+          exec "uuid-for-${vmName}" [ pkgs.libuuid ] ''
+            uuidgen > $out
+          '';
 
         ifElse = condition: resultIf: resultElse: (
           if condition
@@ -428,7 +455,7 @@ in {
         lookingGlass = lib.optionalString (vm.lookingGlass) ''
           <shmem name='looking-glass'>
             <model type='ivshmem-plain'/>
-            <size unit='M'>1024</size>
+            <size unit='M'>128</size>
             <address
               type='pci'
               domain='0x0000'
@@ -447,6 +474,14 @@ in {
           (uuidgen "${vm.name}Setup")
           vm.uuidSetup;
 
+        isVga = pcie: let
+          result = exec "vga-check-${pcie}" [ pkgs.pciutils ] ''
+            lspci -nns ${pcie} | grep VGA > $out || true
+          '';
+        in ifElse (result == "")
+          false
+          true;
+
         pciesXml = optionalConcatFor {
           condition = vm.passthrough.enable;
           array = vm.passthrough.pcies;
@@ -456,7 +491,7 @@ in {
             return = (function: let
               pcieId =
                 "${pcie.lines.bus}:${pcie.lines.slot}.${function.function}";
-              rom = lib.optionalString function.rom ''
+              rom = lib.optionalString (function.fix.rom && (isVga pcieId)) ''
                 <rom bar="on" file="/var/lib/libvirt/roms/pcie-${pcieId}.rom"/>
               '';
             in ''
@@ -493,9 +528,9 @@ in {
           return = (pcie: optionalConcatFor {
             condition = ! pcie.disk;
             array = pcie.lines.functions;
-            return = (function: lib.optionalString function.rom (let
+            return = (function: lib.optionalString (function.fix.rom) (let
               pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function.function}";
-            in ''
+            in lib.optionalString (isVga pcieId) ''
               if [ ! -f "/var/lib/libvirt/roms/pcie-${pcieId}.rom" ]; then
                 PATH_TO_ROM=$(find /sys/devices/pci0000:00/ \
                   | grep ${pcieId} \
@@ -629,7 +664,7 @@ in {
         disk = lib.optionalString (vm.hardware.disk.enable) ''
           <disk type='file' device='disk'>
             <driver name='qemu' type='qcow2' cache='directsync' discard='unmap'/>
-            <source file='${vm.diskPath}/${vm.name}.qcow2'/>
+            <source file='${vm.hardware.disk.path}/${vm.name}.qcow2'/>
             <target dev='sda' bus='scsi'/>
             <boot order='1'/>
             <address type='drive' controller='0' bus='0' target='0' unit='0'/>
