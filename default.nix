@@ -163,9 +163,22 @@ in {
                           default = true;
                         };
                         
-                        rebar = mkOption {
-                          type = types.int;
-                          default = 0;
+                        rebar = {
+                          enable = mkOption {
+                            type = types.bool;
+                            default = false;
+                          };
+                          resources = mkOption {
+                            default = [];
+                            type = listOf(submodule { options = {
+                              resource = mkOption {
+                                type = types.int;
+                              };
+                              resize = mkOption {
+                                type = types.int;
+                              };
+                            };});
+                          };
                         };
                         
                       };
@@ -404,12 +417,28 @@ in {
         );
 
         bindingPcie = let
-          unbindPciesSetter = pcie: function: ''
+          fixPciesSetter = pcie: function: fix: let
+            rebarResources = optionalConcatFor {
+              condition = fix.rebar.enable;
+              array = fix.rebar.resources;
+              return = (resource: ''
+                echo ${toString resource.resize} \
+                  > /sys/bus/pci/devices/0000:${pcie}/resource${toString resource.resource}\_resize | true
+              '');
+            };
+
+          in lib.optionalString fix.rebar.enable ''
+            echo "0000:${pcie}" > /sys/bus/pci/drivers/vfio-pci/unbind | true
+            ${rebarResources}
+            echo "0000:${pcie}" > /sys/bus/pci/drivers/vfio-pci/bind | true
+          '';
+
+          unbindPciesSetter = pcie: function: fix: ''
             echo "${pcie}" > "/sys/bus/pci/devices/0000:${pcie}/driver/unbind" || true
             echo "${pcie}" > /sys/bus/pci/drivers/vfio-pci/new_id || true
           '';
 
-          bindPciesSetter = pcie: function: ''
+          bindPciesSetter = pcie: function: fix: ''
             echo "${function.vendor}" > "/sys/bus/pci/drivers/vfio-pci/remove_id" || true
             echo 1 > "/sys/bus/pci/devices/0000:${pcie}/remove" || true
           '';
@@ -426,13 +455,15 @@ in {
             && ! blacklist.startUnload
           );
 
+          trueCondition = blacklist: pcie: lib.optionalString true;
+
           finalString = condition: binding: optionalConcatFor {
             condition = vm.passthrough.enable;
             array = vm.passthrough.pcies;
             return = (pcie: concatFor pcie.lines.functions (function: let
               pcieId = "${pcie.lines.bus}:${pcie.lines.slot}.${function.function}";
             in 
-              (condition function.blacklist pcie) (binding pcieId function)
+              (condition function.blacklist pcie) (binding pcieId function function.fix)
             ));
           };
 
@@ -440,6 +471,7 @@ in {
           bind = (finalString bindingCondition bindPciesSetter);
           unbind = (finalString bindingCondition unbindPciesSetter);
           startUnload = (finalString blacklistCondition unbindPciesSetter);
+          fix = (finalString trueCondition fixPciesSetter);
         };
 
         restartDmFormated = (lib.optionalString (
@@ -778,6 +810,7 @@ in {
       in
         ''
           ${bindingPcie.startUnload}
+          ${bindingPcie.fix}
 
           mkdir -p /var/lib/libvirt/{hooks,qemu,storage,roms}
           chmod 755 /var/lib/libvirt/{hooks,qemu,storage,roms}
