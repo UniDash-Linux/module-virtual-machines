@@ -309,9 +309,10 @@ in {
       samba = lib.mkIf cfg.sambaAccess.enable {
         openFirewall = true;
         enable = true;
-        securityType = "user";
 
-        shares = {
+        settings = {
+          global.security = "user";
+
           home = {
             path = "/home/${cfg.username}";
             browseable = "yes";
